@@ -3,6 +3,7 @@ from datetime import datetime, timezone
 from app.brain import reason_about_lead
 from app.models import AgentRole, Lead, LeadStatus, TenantConfig, WorkflowEvent
 from app.store import add_event, save_lead
+from app.tools import execute_tools
 
 
 def _event(lead: Lead, event_type: str, **detail) -> None:
@@ -28,7 +29,6 @@ def _role(value):
 
 
 def run_agent(lead: Lead, tenant: TenantConfig) -> dict:
-    """Reason, decide, act, and optionally hand the lead to another specialist."""
     if not lead.current_agent:
         return {"action": "none", "reason": "no_agent_assigned"}
 
@@ -38,52 +38,31 @@ def run_agent(lead: Lead, tenant: TenantConfig) -> dict:
     message = decision.get("message")
     next_agent = _role(decision.get("next_agent"))
 
-    # Hard guardrails remain deterministic even when an LLM is configured.
     if not lead.consent_to_contact:
-        action = "hold_no_contact"
-        next_agent = AgentRole.CONSENT
-        message = None
+        action, next_agent, message = "hold_no_contact", AgentRole.CONSENT, None
     if role == AgentRole.SAFETY:
-        action = "safety_message"
-        next_agent = None
+        action, next_agent = "safety_message", None
 
     if action == "close_out_of_area":
-        lead.status = LeadStatus.LOST
-        lead.current_agent = None
+        lead.status, lead.current_agent = LeadStatus.LOST, None
     elif action == "hold_no_contact":
-        lead.status = LeadStatus.AGENT_HANDOFF
-        lead.current_agent = AgentRole.CONSENT
+        lead.status, lead.current_agent = LeadStatus.AGENT_HANDOFF, AgentRole.CONSENT
     elif action == "ask_question":
-        lead.status = LeadStatus.QUALIFYING
-        lead.current_agent = next_agent or AgentRole.QUALIFICATION
+        lead.status, lead.current_agent = LeadStatus.QUALIFYING, next_agent or AgentRole.QUALIFICATION
     elif action == "offer_booking":
-        lead.status = LeadStatus.QUALIFIED
-        lead.current_agent = AgentRole.BOOKING
+        lead.status, lead.current_agent = LeadStatus.QUALIFIED, AgentRole.BOOKING
     elif action == "follow_up":
         lead.current_agent = AgentRole.FOLLOWUP
     elif action == "safety_message":
-        lead.status = LeadStatus.AGENT_HANDOFF
-        lead.current_agent = AgentRole.SAFETY
+        lead.status, lead.current_agent = LeadStatus.AGENT_HANDOFF, AgentRole.SAFETY
     elif next_agent:
         lead.current_agent = next_agent
 
     lead.agent_reason = decision.get("reason") or action
     lead.updated_at = datetime.now(timezone.utc)
     save_lead(lead)
-    _event(
-        lead,
-        "agent_decision",
-        agent=role.value,
-        action=action,
-        next_agent=lead.current_agent.value if lead.current_agent else None,
-        message=message,
-        confidence=decision.get("confidence"),
-        reasoning_source="llm_or_safe_fallback",
-    )
-    return {
-        "action": action,
-        "message": message,
-        "next_agent": lead.current_agent.value if lead.current_agent else None,
-        "reason": lead.agent_reason,
-        "confidence": decision.get("confidence"),
-    }
+
+    tool_results = execute_tools(action, lead, tenant, message)
+    _event(lead, "agent_action_executed", agent=role.value, action=action, tools=tool_results)
+    _event(lead, "agent_decision", agent=role.value, action=action, next_agent=lead.current_agent.value if lead.current_agent else None, message=message, confidence=decision.get("confidence"), reasoning_source="llm_or_safe_fallback")
+    return {"action": action, "message": message, "next_agent": lead.current_agent.value if lead.current_agent else None, "reason": lead.agent_reason, "confidence": decision.get("confidence"), "tools": tool_results}
