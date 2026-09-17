@@ -1,4 +1,5 @@
-from app.models import Lead, LeadCreate, LeadReply, LeadStatus
+from app.agents import run_agent
+from app.models import AgentRole, Lead, LeadCreate, LeadReply, LeadStatus
 from app.workflow import apply_reply, book_lead, demo_tenant, evaluate_qualification, initial_route
 
 
@@ -18,9 +19,11 @@ def test_golden_path_qualifies_and_books():
     initial_route(lead, tenant)
     evaluate_qualification(lead, tenant)
     assert lead.status == LeadStatus.QUALIFIED
+    assert lead.current_agent == AgentRole.BOOKING
 
     book_lead(lead, "2026-09-18T09:00:00-04:00")
     assert lead.status == LeadStatus.BOOKED
+    assert lead.current_agent == AgentRole.FOLLOWUP
 
 
 def test_stop_reply_opts_out():
@@ -30,9 +33,10 @@ def test_stop_reply_opts_out():
     apply_reply(lead, LeadReply(message="STOP"), tenant)
     assert lead.status == LeadStatus.OPTED_OUT
     assert lead.consent_to_contact is False
+    assert lead.current_agent is None
 
 
-def test_outside_service_area_escalates():
+def test_outside_service_area_routes_to_agent_and_closes():
     tenant = demo_tenant()
     lead = Lead(**LeadCreate(
         name="Outside Area",
@@ -45,4 +49,23 @@ def test_outside_service_area_escalates():
         consent_to_contact=True,
     ).model_dump())
     evaluate_qualification(lead, tenant)
-    assert lead.status == LeadStatus.HUMAN_REVIEW
+    assert lead.status == LeadStatus.AGENT_HANDOFF
+    assert lead.current_agent == AgentRole.SERVICE_AREA
+    result = run_agent(lead, tenant)
+    assert result["action"] == "close_out_of_area"
+    assert lead.status == LeadStatus.LOST
+
+
+def test_emergency_routes_to_safety_agent():
+    tenant = demo_tenant()
+    lead = Lead(**LeadCreate(
+        name="Emergency",
+        phone="+15555550004",
+        message="I smell a gas leak",
+        consent_to_contact=True,
+    ).model_dump())
+    initial_route(lead, tenant)
+    assert lead.status == LeadStatus.AGENT_HANDOFF
+    assert lead.current_agent == AgentRole.SAFETY
+    result = run_agent(lead, tenant)
+    assert result["action"] == "send_safety_script_and_pause_sales"
