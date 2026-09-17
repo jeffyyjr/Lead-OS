@@ -1,17 +1,19 @@
 from fastapi import FastAPI, HTTPException
 
+from app.agents import run_agent
 from app.models import BookingRequest, Lead, LeadCreate, LeadReply, LeadStatus
 from app.store import find_duplicate, get_lead, init_db, list_events, save_lead
 from app.workflow import (
     apply_reply,
     book_lead,
     demo_tenant,
+    evaluate_qualification,
     initial_route,
     required_questions,
     schedule_followups,
 )
 
-app = FastAPI(title="Lead-OS", version="0.2.0")
+app = FastAPI(title="Lead-OS", version="0.3.0")
 
 
 @app.on_event("startup")
@@ -21,12 +23,12 @@ def startup():
 
 @app.get("/")
 def root():
-    return {"service": "Lead-OS", "status": "running", "version": "0.2.0"}
+    return {"service": "Lead-OS", "status": "running", "version": "0.3.0", "mode": "agent_autonomous"}
 
 
 @app.get("/health")
 def health():
-    return {"ok": True}
+    return {"ok": True, "mode": "agent_autonomous"}
 
 
 @app.post("/api/leads", response_model=Lead)
@@ -41,7 +43,11 @@ def create_lead(payload: LeadCreate):
     tenant = demo_tenant()
     lead = Lead(**payload.model_dump())
     save_lead(lead)
-    return initial_route(lead, tenant)
+    lead = initial_route(lead, tenant)
+    if lead.status == LeadStatus.AGENT_HANDOFF:
+        run_agent(lead, tenant)
+        lead = get_lead(lead.id) or lead
+    return lead
 
 
 @app.get("/api/leads/{lead_id}", response_model=Lead)
@@ -73,7 +79,20 @@ def reply_to_lead(lead_id: str, payload: LeadReply):
     lead = get_lead(lead_id)
     if not lead:
         raise HTTPException(status_code=404, detail="lead not found")
-    return apply_reply(lead, payload, demo_tenant())
+    updated = apply_reply(lead, payload, demo_tenant())
+    if updated.status == LeadStatus.AGENT_HANDOFF:
+        run_agent(updated, demo_tenant())
+        updated = get_lead(updated.id) or updated
+    return updated
+
+
+@app.post("/api/leads/{lead_id}/agent/run")
+def execute_agent(lead_id: str):
+    lead = get_lead(lead_id)
+    if not lead:
+        raise HTTPException(status_code=404, detail="lead not found")
+    result = run_agent(lead, demo_tenant())
+    return {"lead": get_lead(lead_id), "agent_result": result}
 
 
 @app.post("/api/leads/{lead_id}/book", response_model=Lead)
@@ -99,6 +118,8 @@ def opt_out(lead_id: str):
         raise HTTPException(status_code=404, detail="lead not found")
     lead.status = LeadStatus.OPTED_OUT
     lead.consent_to_contact = False
+    lead.current_agent = None
+    lead.agent_reason = "opted_out"
     return save_lead(lead)
 
 
@@ -123,5 +144,4 @@ def demo_hvac():
     lead = Lead(**payload.model_dump())
     save_lead(lead)
     lead = initial_route(lead, demo_tenant())
-    from app.workflow import evaluate_qualification
     return evaluate_qualification(lead, demo_tenant())
