@@ -3,17 +3,9 @@ from fastapi import FastAPI, HTTPException
 from app.agents import run_agent
 from app.models import BookingRequest, Lead, LeadCreate, LeadReply, LeadStatus
 from app.store import find_duplicate, get_lead, init_db, list_events, save_lead
-from app.workflow import (
-    apply_reply,
-    book_lead,
-    demo_tenant,
-    evaluate_qualification,
-    initial_route,
-    required_questions,
-    schedule_followups,
-)
+from app.workflow import apply_reply, book_lead, demo_tenant, evaluate_qualification, initial_route, required_questions, schedule_followups
 
-app = FastAPI(title="Lead-OS", version="0.3.0")
+app = FastAPI(title="Lead-OS", version="0.4.0")
 
 
 @app.on_event("startup")
@@ -23,23 +15,21 @@ def startup():
 
 @app.get("/")
 def root():
-    return {"service": "Lead-OS", "status": "running", "version": "0.3.0", "mode": "agent_autonomous"}
+    return {"service": "Lead-OS", "status": "running", "version": "0.4.0", "mode": "autonomous_agent_reasoning"}
 
 
 @app.get("/health")
 def health():
-    return {"ok": True, "mode": "agent_autonomous"}
+    return {"ok": True, "mode": "autonomous_agent_reasoning"}
 
 
 @app.post("/api/leads", response_model=Lead)
 def create_lead(payload: LeadCreate):
     if not payload.phone and not payload.email:
         raise HTTPException(status_code=400, detail="phone or email is required")
-
     existing = find_duplicate(payload.tenant_id, payload.phone, payload.email)
     if existing:
         return existing
-
     tenant = demo_tenant()
     lead = Lead(**payload.model_dump())
     save_lead(lead)
@@ -95,6 +85,29 @@ def execute_agent(lead_id: str):
     return {"lead": get_lead(lead_id), "agent_result": result}
 
 
+@app.post("/api/leads/{lead_id}/agent/loop")
+def execute_agent_loop(lead_id: str, max_steps: int = 5):
+    lead = get_lead(lead_id)
+    if not lead:
+        raise HTTPException(status_code=404, detail="lead not found")
+    max_steps = max(1, min(max_steps, 10))
+    results = []
+    previous = None
+    for _ in range(max_steps):
+        lead = get_lead(lead_id) or lead
+        if not lead.current_agent or lead.status in {LeadStatus.BOOKED, LeadStatus.WON, LeadStatus.LOST, LeadStatus.OPTED_OUT}:
+            break
+        signature = (lead.status.value, lead.current_agent.value, lead.agent_reason)
+        result = run_agent(lead, demo_tenant())
+        results.append(result)
+        updated = get_lead(lead_id) or lead
+        new_signature = (updated.status.value, updated.current_agent.value if updated.current_agent else None, updated.agent_reason)
+        if new_signature == signature or new_signature == previous:
+            break
+        previous = signature
+    return {"lead": get_lead(lead_id), "steps": results}
+
+
 @app.post("/api/leads/{lead_id}/book", response_model=Lead)
 def book(lead_id: str, payload: BookingRequest):
     lead = get_lead(lead_id)
@@ -125,19 +138,7 @@ def opt_out(lead_id: str):
 
 @app.post("/api/demo/hvac", response_model=Lead)
 def demo_hvac():
-    payload = LeadCreate(
-        tenant_id="demo-hvac",
-        source="website",
-        name="Demo Homeowner",
-        phone="+15555550123",
-        service_type="AC repair",
-        postal_code="19054",
-        urgency="today",
-        property_type="residential",
-        preferred_time="this afternoon",
-        message="My AC stopped working and the house is getting hot.",
-        consent_to_contact=True,
-    )
+    payload = LeadCreate(tenant_id="demo-hvac", source="website", name="Demo Homeowner", phone="+15555550123", service_type="AC repair", postal_code="19054", urgency="today", property_type="residential", preferred_time="this afternoon", message="My AC stopped working and the house is getting hot.", consent_to_contact=True)
     existing = find_duplicate(payload.tenant_id, payload.phone, payload.email)
     if existing:
         return existing
