@@ -11,13 +11,22 @@ class LeadStatus(str, Enum):
     CONTACTED = "contacted"
     QUALIFYING = "qualifying"
     QUALIFIED = "qualified"
+    AGENT_HANDOFF = "agent_handoff"
     BOOKED = "booked"
     ESTIMATE_COMPLETED = "estimate_completed"
     WON = "won"
     LOST = "lost"
     REENGAGEMENT = "reengagement"
-    HUMAN_REVIEW = "human_review"
     OPTED_OUT = "opted_out"
+
+
+class AgentRole(str, Enum):
+    QUALIFICATION = "qualification_agent"
+    BOOKING = "booking_agent"
+    SERVICE_AREA = "service_area_agent"
+    SAFETY = "safety_agent"
+    CONSENT = "consent_agent"
+    FOLLOWUP = "followup_agent"
 
 
 class TenantConfig(BaseModel):
@@ -60,6 +69,8 @@ class Lead(BaseModel):
     message: Optional[str] = None
     consent_to_contact: bool = False
     status: LeadStatus = LeadStatus.NEW
+    current_agent: Optional[AgentRole] = None
+    agent_reason: Optional[str] = None
     created_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
     updated_at: datetime = Field(default_factory=lambda: datetime.now(timezone.utc))
 
