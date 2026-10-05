@@ -1,18 +1,40 @@
 import json
 import os
+import smtplib
 import urllib.parse
 import urllib.request
+from email.message import EmailMessage
 from typing import Any
 
 from app.models import Lead, TenantConfig
 
 
+def send_email(lead: Lead, message: str) -> dict[str, Any]:
+    """Send through Gmail SMTP using an app password (GMAIL_ADDRESS / GMAIL_APP_PASSWORD)."""
+    sender = os.getenv("GMAIL_ADDRESS")
+    email = EmailMessage()
+    email["From"] = f"{os.getenv('EMAIL_FROM_NAME', 'Lead-OS')} <{sender}>"
+    email["To"] = lead.email
+    email["Subject"] = os.getenv("EMAIL_SUBJECT", "About your service request")
+    email.set_content(f"{message}\n\nReply STOP to stop receiving these messages.")
+    try:
+        with smtplib.SMTP("smtp.gmail.com", 587, timeout=15) as smtp:
+            smtp.starttls()
+            smtp.login(sender, os.getenv("GMAIL_APP_PASSWORD"))
+            smtp.send_message(email)
+        return {"ok": True, "mode": "gmail", "sent": True}
+    except Exception as exc:
+        return {"ok": False, "mode": "gmail", "sent": False, "error": type(exc).__name__}
+
+
 def send_customer_message(lead: Lead, message: str | None) -> dict[str, Any]:
-    """Send through a configured webhook, or safely simulate when no provider is configured."""
+    """Send by Gmail or a configured webhook, or safely simulate when no provider is configured."""
     if not message:
         return {"ok": True, "mode": "none", "sent": False}
     if not lead.consent_to_contact:
         return {"ok": False, "mode": "blocked", "sent": False, "reason": "no_contact_consent"}
+    if lead.email and os.getenv("GMAIL_ADDRESS") and os.getenv("GMAIL_APP_PASSWORD"):
+        return send_email(lead, message)
     webhook = os.getenv("MESSAGING_WEBHOOK_URL")
     if not webhook:
         return {"ok": True, "mode": "simulation", "sent": False, "message": message}
