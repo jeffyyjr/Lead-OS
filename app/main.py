@@ -92,19 +92,18 @@ def execute_agent_loop(lead_id: str, max_steps: int = 5):
         raise HTTPException(status_code=404, detail="lead not found")
     max_steps = max(1, min(max_steps, 10))
     results = []
-    previous = None
     for _ in range(max_steps):
         lead = get_lead(lead_id) or lead
         if not lead.current_agent or lead.status in {LeadStatus.BOOKED, LeadStatus.WON, LeadStatus.LOST, LeadStatus.OPTED_OUT}:
             break
-        signature = (lead.status.value, lead.current_agent.value, lead.agent_reason)
+        signature = (lead.status, lead.current_agent)
         result = run_agent(lead, demo_tenant())
         results.append(result)
         updated = get_lead(lead_id) or lead
-        new_signature = (updated.status.value, updated.current_agent.value if updated.current_agent else None, updated.agent_reason)
-        if new_signature == signature or new_signature == previous:
+        # Stop once the customer has been messaged (wait for their reply)
+        # or the agent made no progress, so the same message never repeats.
+        if result.get("message") or (updated.status, updated.current_agent) == signature:
             break
-        previous = signature
     return {"lead": get_lead(lead_id), "steps": results}
 
 
