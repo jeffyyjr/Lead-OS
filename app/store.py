@@ -1,18 +1,45 @@
 import json
+import os
 import sqlite3
+from contextlib import contextmanager
 from pathlib import Path
 from typing import Optional
 
-from app.models import Lead, WorkflowEvent
+from app.models import Lead, TenantConfig, WorkflowEvent
 
+# Postgres when DATABASE_URL is set (e.g. on Render), otherwise a local SQLite file.
+DATABASE_URL = os.getenv("DATABASE_URL")
 DB_PATH = Path("data/lead_os.db")
-DB_PATH.parent.mkdir(parents=True, exist_ok=True)
 
 
+@contextmanager
 def _connect():
-    conn = sqlite3.connect(DB_PATH)
-    conn.row_factory = sqlite3.Row
-    return conn
+    if DATABASE_URL:
+        import psycopg
+        from psycopg.rows import dict_row
+
+        with psycopg.connect(DATABASE_URL, row_factory=dict_row) as conn:
+            yield _Conn(conn, "%s")
+    else:
+        DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+        conn = sqlite3.connect(DB_PATH)
+        conn.row_factory = sqlite3.Row
+        try:
+            with conn:
+                yield _Conn(conn, "?")
+        finally:
+            conn.close()
+
+
+class _Conn:
+    """Lets queries be written with ? placeholders for both SQLite and Postgres."""
+
+    def __init__(self, conn, placeholder: str):
+        self.conn = conn
+        self.placeholder = placeholder
+
+    def execute(self, sql: str, params: tuple = ()):
+        return self.conn.execute(sql.replace("?", self.placeholder), params)
 
 
 def init_db():
@@ -39,13 +66,25 @@ def init_db():
             )
             """
         )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS tenants (
+                tenant_id TEXT PRIMARY KEY,
+                payload TEXT NOT NULL
+            )
+            """
+        )
 
 
 def save_lead(lead: Lead) -> Lead:
     payload = lead.model_dump(mode="json")
     with _connect() as conn:
         conn.execute(
-            "INSERT OR REPLACE INTO leads (id, tenant_id, phone, email, payload) VALUES (?, ?, ?, ?, ?)",
+            """
+            INSERT INTO leads (id, tenant_id, phone, email, payload) VALUES (?, ?, ?, ?, ?)
+            ON CONFLICT (id) DO UPDATE SET tenant_id = excluded.tenant_id, phone = excluded.phone,
+                email = excluded.email, payload = excluded.payload
+            """,
             (lead.id, lead.tenant_id, lead.phone, lead.email, json.dumps(payload)),
         )
     return lead
@@ -88,8 +127,30 @@ def add_event(event: WorkflowEvent) -> WorkflowEvent:
 
 def list_events(lead_id: str) -> list[WorkflowEvent]:
     with _connect() as conn:
-        rows = conn.execute(
-            "SELECT payload FROM events WHERE lead_id = ? ORDER BY rowid ASC",
-            (lead_id,),
-        ).fetchall()
-    return [WorkflowEvent.model_validate(json.loads(row["payload"])) for row in rows]
+        rows = conn.execute("SELECT payload FROM events WHERE lead_id = ?", (lead_id,)).fetchall()
+    events = [WorkflowEvent.model_validate(json.loads(row["payload"])) for row in rows]
+    return sorted(events, key=lambda event: event.created_at)
+
+
+def save_tenant(tenant: TenantConfig) -> TenantConfig:
+    with _connect() as conn:
+        conn.execute(
+            """
+            INSERT INTO tenants (tenant_id, payload) VALUES (?, ?)
+            ON CONFLICT (tenant_id) DO UPDATE SET payload = excluded.payload
+            """,
+            (tenant.tenant_id, tenant.model_dump_json()),
+        )
+    return tenant
+
+
+def get_tenant(tenant_id: str) -> Optional[TenantConfig]:
+    with _connect() as conn:
+        row = conn.execute("SELECT payload FROM tenants WHERE tenant_id = ?", (tenant_id,)).fetchone()
+    return TenantConfig.model_validate_json(row["payload"]) if row else None
+
+
+def list_tenants() -> list[TenantConfig]:
+    with _connect() as conn:
+        rows = conn.execute("SELECT payload FROM tenants ORDER BY tenant_id").fetchall()
+    return [TenantConfig.model_validate_json(row["payload"]) for row in rows]
