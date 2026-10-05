@@ -68,4 +68,9 @@ def test_emergency_routes_to_safety_agent():
     assert lead.status == LeadStatus.AGENT_HANDOFF
     assert lead.current_agent == AgentRole.SAFETY
     result = run_agent(lead, tenant)
-    assert result["action"] == "send_safety_script_and_pause_sales"
+    # Sends the preapproved safety script and pauses sales automation.
+    assert result["action"] == "safety_message"
+    assert "emergency" in result["message"]
+    assert "booking" not in result["tools"]
+    assert lead.status == LeadStatus.AGENT_HANDOFF
+    assert lead.current_agent == AgentRole.SAFETY
